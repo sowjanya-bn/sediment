@@ -81,7 +81,7 @@ python cli.py --export-all > all_entries.jsonl
 
 ---
 
-## Output schema
+## Output schema (v1.1)
 
 Every entry produces the following fields. No nulls — always returns the closest valid value.
 
@@ -89,8 +89,9 @@ Every entry produces the following fields. No nulls — always returns the close
 |---|---|---|
 | `id` | uuid | Unique entry ID |
 | `timestamp` | ISO8601 | Assigned at ingestion, never inferred from text |
-| `schema_version` | string | Schema version (`1.0`) |
+| `schema_version` | string | Schema version (`1.1`) |
 | `raw_text` | string | Verbatim input, always stored |
+| `input_type` | affective / metacognitive | Affective = feelings; metacognitive = patterns/observations about self |
 | `valence` | float | -1.0 (negative) to +1.0 (positive) |
 | `arousal` | low / medium / high | Energy/activation level |
 | `emotion_label` | string | Dominant emotion (see vocabulary) |
@@ -98,17 +99,19 @@ Every entry produces the following fields. No nulls — always returns the close
 | `intensity` | low / medium / high | Strength of emotional expression |
 | `salient_focus` | string | 3–6 word concrete phrase — what it's actually about |
 | `state_direction` | string | Trajectory (see vocabulary) |
-| `low_confidence` | bool | True if input is ambiguous or extraction failed validation |
-| `confidence_score` | float | 0.0–1.0 model confidence |
+| `low_confidence` | bool | Always derived from `confidence_score < 0.5` |
+| `confidence_score` | float | 0.0–1.0; down-ranked by uncertainty phrases and metacognitive routing |
 | `entry_hash` | sha256 | sha256(raw_text) — stable across reprocessing |
 
 ### Controlled vocabulary
 
-**emotion_label:** `joy` `sadness` `anger` `fear` `anticipation` `trust`
+**emotion_label:** `joy` `sadness` `anger` `fear` `anticipation` `neutral` `flat` `ambivalent` `indeterminate`
 
 **themes:** `uncertainty` `overwhelm` `purpose` `traction` `self_trust` `isolation` `momentum` `creative_satisfaction`
 
-**state_direction:** `gaining_clarity` `losing_direction` `building_momentum` `stuck` `regaining_confidence` `drifting`
+**state_direction:** `gaining_clarity` `losing_direction` `building_momentum` `stuck` `regaining_confidence` `drifting` `indeterminate`
+
+`indeterminate` is the unified uncertainty output for both `emotion_label` and `state_direction` — used when no signal is clear enough to classify. It is a schema outcome, not a fallback.
 
 ---
 
@@ -142,6 +145,24 @@ Each benchmark defines directional expectations per input (valence sign, expecte
 
 ---
 
+## Corrections (CR layer)
+
+Field-level corrections to extracted records. A correction to one field does not affect the rest of the record — originals are never mutated.
+
+| CR type | Field corrected |
+|---|---|
+| `relabel` | `emotion_label` |
+| `valence_nudge` | `valence` |
+| `confidence_override` | `confidence_score` (also syncs `low_confidence`) |
+| `state_direction_edit` | `state_direction` |
+| `theme_edit` | `themes` |
+
+Each CR record carries `entry_hash` — corrections made against a different version of the entry are ignored when replaying. `schema_version` is required on every CR record.
+
+`state_direction` corrections are snapshot annotations. The design keeps them as separate records (not embedded in entries) so that future relational computation across entries can supersede them without migration.
+
+---
+
 ## Project structure
 
 ```
@@ -153,6 +174,10 @@ sediment/
 ├── storage/
 │   ├── db.py           — SQLite interface
 │   └── export.py       — JSON export utilities
+├── corrections/
+│   ├── schema.py       — CorrectionRecord model, CR_TYPES
+│   ├── db.py           — corrections table, save/query
+│   └── apply.py        — apply_correction, get_effective_entry
 ├── cli.py              — CLI entry point
 ├── tests/
 │   ├── test_extract.py     — unit tests (mocked)
