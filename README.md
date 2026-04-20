@@ -99,7 +99,7 @@ Every entry produces the following fields. No nulls — always returns the close
 | `intensity` | low / medium / high | Strength of emotional expression |
 | `salient_focus` | string | 3–6 word concrete phrase — what it's actually about |
 | `state_direction` | string | Trajectory (see vocabulary) |
-| `low_confidence` | bool | Always derived from `confidence_score < 0.5` |
+| `low_confidence` | bool | `true` when `confidence_score < 0.5` or extraction failed validation |
 | `confidence_score` | float | 0.0–1.0; down-ranked by uncertainty phrases and metacognitive routing |
 | `entry_hash` | sha256 | sha256(raw_text) — stable across reprocessing |
 
