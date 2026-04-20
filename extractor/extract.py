@@ -252,7 +252,7 @@ def extract(raw_text: str, backend: str = "anthropic", ollama_model: str = "llam
     if result.get("input_type") == "metacognitive":
         result["confidence_score"] = min(result.get("confidence_score", 0.5), 0.75)
 
-    result["low_confidence"] = result.get("confidence_score", 0.0) < 0.5
+    result["low_confidence"] = result.get("confidence_score", 0.0) < 0.5 or validation_result == "fail"
 
     low_conf = result.get("low_confidence", False)
     logger.info(

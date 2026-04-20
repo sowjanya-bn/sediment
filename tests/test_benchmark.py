@@ -54,6 +54,7 @@ def run(text, backend, ollama_model):
 
 def assert_valid_schema(r):
     """Every record must be schema-complete with valid vocab values."""
+    assert r["input_type"] in {"affective", "metacognitive"}, f"Bad input_type: {r['input_type']}"
     assert r["emotion_label"] in EMOTION_LABELS, f"Bad emotion_label: {r['emotion_label']}"
     assert r["state_direction"] in STATE_DIRECTIONS, f"Bad state_direction: {r['state_direction']}"
     assert r["arousal"] in {"low", "medium", "high"}
@@ -63,6 +64,8 @@ def assert_valid_schema(r):
     assert -1.0 <= r["valence"] <= 1.0
     assert 0.0 <= r["confidence_score"] <= 1.0
     assert 3 <= len(r["salient_focus"].split()) <= 6, f"Bad salient_focus: '{r['salient_focus']}'"
+    assert r["low_confidence"] == (r["confidence_score"] < 0.5), \
+        f"low_confidence/confidence_score mismatch: {r['low_confidence']} / {r['confidence_score']}"
 
 
 # ---------------------------------------------------------------------------
@@ -134,12 +137,17 @@ class TestFlatLowSignal:
 
 
 class TestAmbiguousDirection:
-    """'Starting things and not finishing' — negative lean, uncertain direction."""
+    """'Starting things and not finishing' — metacognitive, uncertain direction."""
 
     TEXT = "I keep starting things and not finishing them. Not sure if that's growth or just chaos."
 
     def test_schema_valid(self, backend, ollama_model):
         assert_valid_schema(run(self.TEXT, backend, ollama_model))
+
+    def test_routed_as_metacognitive(self, backend, ollama_model):
+        r = run(self.TEXT, backend, ollama_model)
+        assert r["input_type"] == "metacognitive", \
+            f"Pattern-observation entry should be metacognitive, got {r['input_type']}"
 
     def test_valence_not_positive(self, backend, ollama_model):
         r = run(self.TEXT, backend, ollama_model)
@@ -148,7 +156,12 @@ class TestAmbiguousDirection:
     def test_state_direction_not_forward(self, backend, ollama_model):
         r = run(self.TEXT, backend, ollama_model)
         assert r["state_direction"] not in {"building_momentum", "regaining_confidence"}, \
-            f"Ambiguous rant should not show strong forward direction, got {r['state_direction']}"
+            f"Ambiguous entry should not show strong forward direction, got {r['state_direction']}"
+
+    def test_confidence_reduced_by_uncertainty(self, backend, ollama_model):
+        r = run(self.TEXT, backend, ollama_model)
+        assert r["confidence_score"] <= 0.75, \
+            f"Metacognitive + uncertainty phrases should cap confidence, got {r['confidence_score']}"
 
 
 class TestPurposeLoss:
