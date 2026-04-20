@@ -10,8 +10,9 @@ _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS entries (
   id TEXT PRIMARY KEY,
   timestamp TEXT NOT NULL,
-  schema_version TEXT NOT NULL DEFAULT '1.0',
+  schema_version TEXT NOT NULL DEFAULT '1.1',
   raw_text TEXT NOT NULL,
+  input_type TEXT NOT NULL DEFAULT 'affective',
   valence REAL,
   arousal TEXT,
   emotion_label TEXT,
@@ -26,6 +27,10 @@ CREATE TABLE IF NOT EXISTS entries (
 CREATE INDEX IF NOT EXISTS idx_timestamp ON entries(timestamp);
 """
 
+_MIGRATE_SQL = [
+    "ALTER TABLE entries ADD COLUMN input_type TEXT NOT NULL DEFAULT 'affective'",
+]
+
 
 def _connect() -> sqlite3.Connection:
     _SEDIMENT_DIR.mkdir(parents=True, exist_ok=True)
@@ -38,6 +43,12 @@ def init_db() -> None:
     conn = _connect()
     with conn:
         conn.executescript(_CREATE_TABLE_SQL)
+        # Migrate existing DBs that predate v1.1 columns
+        for stmt in _MIGRATE_SQL:
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # column already exists
     conn.close()
 
 
@@ -49,16 +60,17 @@ def save_entry(record: dict) -> None:
         conn.execute(
             """
             INSERT OR REPLACE INTO entries
-              (id, timestamp, schema_version, raw_text, valence, arousal,
+              (id, timestamp, schema_version, raw_text, input_type, valence, arousal,
                emotion_label, themes, intensity, salient_focus, state_direction,
                low_confidence, confidence_score, entry_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record["id"],
                 record["timestamp"],
                 record["schema_version"],
                 record["raw_text"],
+                record.get("input_type", "affective"),
                 record["valence"],
                 record["arousal"],
                 record["emotion_label"],
@@ -105,12 +117,10 @@ def get_all_entries() -> list[dict]:
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
-    # Deserialize themes from JSON string
     if isinstance(d.get("themes"), str):
         try:
             d["themes"] = json.loads(d["themes"])
         except (json.JSONDecodeError, TypeError):
             d["themes"] = [d["themes"]]
-    # Convert low_confidence back to bool
     d["low_confidence"] = bool(d.get("low_confidence", 0))
     return d

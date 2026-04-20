@@ -10,7 +10,10 @@ import anthropic
 import ollama as _ollama
 
 from .prompt import SYSTEM_PROMPT, STRICT_SYSTEM_PROMPT, build_user_message
-from .schema import validate_record, EMOTION_LABELS, STATE_DIRECTIONS, THEMES
+from .schema import (
+    validate_record, EMOTION_LABELS, STATE_DIRECTIONS, THEMES,
+    INPUT_TYPES, UNCERTAINTY_PHRASES, SCHEMA_VERSION,
+)
 
 # --- Logging setup ---
 
@@ -29,7 +32,7 @@ def _get_logger() -> logging.Logger:
     return logger
 
 
-# --- Flat/short input detection ---
+# --- Input analysis ---
 
 _FLAT_INPUTS = {"ok", "fine", "meh", "okay", "k", "yeah", "yep", "nope", "no", "yes"}
 
@@ -43,6 +46,19 @@ def is_short_or_flat(text: str) -> bool:
     return False
 
 
+def uncertainty_penalty(text: str) -> float:
+    """Return a confidence penalty (0.0–0.3) based on uncertainty phrase density."""
+    lower = text.lower()
+    hits = sum(1 for phrase in UNCERTAINTY_PHRASES if phrase in lower)
+    if hits == 0:
+        return 0.0
+    if hits == 1:
+        return 0.1
+    if hits == 2:
+        return 0.2
+    return 0.3
+
+
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -51,15 +67,16 @@ def short_input_default(entry_id: str, timestamp: str, raw_text: str, entry_hash
     return {
         "id": entry_id,
         "timestamp": timestamp,
-        "schema_version": "1.0",
+        "schema_version": SCHEMA_VERSION,
         "raw_text": raw_text,
+        "input_type": "affective",
         "valence": 0.0,
         "arousal": "low",
-        "emotion_label": "trust",
+        "emotion_label": "indeterminate",
         "themes": ["uncertainty"],
         "intensity": "low",
         "salient_focus": "no clear focus",
-        "state_direction": "drifting",
+        "state_direction": "indeterminate",
         "low_confidence": True,
         "confidence_score": 0.1,
         "entry_hash": entry_hash,
@@ -67,21 +84,21 @@ def short_input_default(entry_id: str, timestamp: str, raw_text: str, entry_hash
 
 
 def _force_defaults(result: dict) -> dict:
-    """Fill in any missing or invalid fields with safe defaults."""
+    """Fill missing or invalid fields with safe defaults after validation failure."""
     defaults = {
+        "input_type": "affective",
         "valence": 0.0,
         "arousal": "low",
-        "emotion_label": "trust",
+        "emotion_label": "indeterminate",
         "themes": ["uncertainty"],
         "intensity": "low",
         "salient_focus": "no clear focus",
-        "state_direction": "drifting",
+        "state_direction": "indeterminate",
         "low_confidence": True,
         "confidence_score": 0.1,
     }
     for key, val in defaults.items():
-        current = result.get(key)
-        if current is None:
+        if result.get(key) is None:
             result[key] = val
     # Clamp numeric ranges
     try:
@@ -92,11 +109,13 @@ def _force_defaults(result: dict) -> dict:
         result["confidence_score"] = max(0.0, min(1.0, float(result["confidence_score"])))
     except (TypeError, ValueError):
         result["confidence_score"] = 0.1
-    # Fix out-of-vocabulary values (not just None)
+    # Fix out-of-vocabulary values
+    if result.get("input_type") not in INPUT_TYPES:
+        result["input_type"] = "affective"
     if result.get("emotion_label") not in EMOTION_LABELS:
-        result["emotion_label"] = "trust"
+        result["emotion_label"] = "indeterminate"
     if result.get("state_direction") not in STATE_DIRECTIONS:
-        result["state_direction"] = "drifting"
+        result["state_direction"] = "indeterminate"
     if result.get("arousal") not in {"low", "medium", "high"}:
         result["arousal"] = "low"
     if result.get("intensity") not in {"low", "medium", "high"}:
@@ -117,7 +136,6 @@ def _force_defaults(result: dict) -> dict:
 # --- LLM call ---
 
 def _strip_fences(content: str) -> str:
-    """Remove markdown code fences if the model added them despite instructions."""
     if content.startswith("```"):
         lines = content.splitlines()
         return "\n".join(line for line in lines if not line.startswith("```")).strip()
@@ -173,7 +191,9 @@ def extract(raw_text: str, backend: str = "anthropic", ollama_model: str = "llam
         )
         return record
 
-    # First attempt
+    # Compute uncertainty penalty before LLM call — applied to model's self-reported score
+    penalty = uncertainty_penalty(raw_text)
+
     validation_result = "fail"
     try:
         result = _call_llm(raw_text, strict=False, backend=backend, ollama_model=ollama_model)
@@ -183,14 +203,13 @@ def extract(raw_text: str, backend: str = "anthropic", ollama_model: str = "llam
             "timestamp": timestamp,
             "raw_text": raw_text,
             "entry_hash": entry_hash,
-            "schema_version": "1.0",
+            "schema_version": SCHEMA_VERSION,
         })
         if is_valid:
             validation_result = "pass"
         else:
-            # Retry with strict prompt
             logger.info(
-                "id=%s snippet=%r validation_result=retry low_confidence=False err=%s",
+                "id=%s snippet=%r validation_result=retry err=%s",
                 entry_id, snippet, err,
             )
             result = _call_llm(raw_text, strict=True, backend=backend, ollama_model=ollama_model)
@@ -200,7 +219,7 @@ def extract(raw_text: str, backend: str = "anthropic", ollama_model: str = "llam
                 "timestamp": timestamp,
                 "raw_text": raw_text,
                 "entry_hash": entry_hash,
-                "schema_version": "1.0",
+                "schema_version": SCHEMA_VERSION,
             })
             if is_valid2:
                 validation_result = "pass"
@@ -214,8 +233,7 @@ def extract(raw_text: str, backend: str = "anthropic", ollama_model: str = "llam
                 )
     except Exception as e:
         logger.error("id=%s snippet=%r extraction_error=%s", entry_id, snippet, str(e))
-        result = {}
-        result = _force_defaults(result)
+        result = _force_defaults({})
         result["low_confidence"] = True
         validation_result = "fail"
 
@@ -223,15 +241,23 @@ def extract(raw_text: str, backend: str = "anthropic", ollama_model: str = "llam
     result["timestamp"] = timestamp
     result["raw_text"] = raw_text
     result["entry_hash"] = entry_hash
-    result["schema_version"] = "1.0"
+    result["schema_version"] = SCHEMA_VERSION
 
-    if result.get("confidence_score", 0.0) < 0.5:
-        result["low_confidence"] = True
+    # Apply uncertainty phrase penalty to model's self-reported confidence
+    if penalty > 0:
+        raw_score = result.get("confidence_score", 0.5)
+        result["confidence_score"] = max(0.0, round(raw_score - penalty, 2))
+
+    # Metacognitive entries: cap confidence — patterns ≠ present affective state
+    if result.get("input_type") == "metacognitive":
+        result["confidence_score"] = min(result.get("confidence_score", 0.5), 0.75)
+
+    result["low_confidence"] = result.get("confidence_score", 0.0) < 0.5
 
     low_conf = result.get("low_confidence", False)
     logger.info(
-        "id=%s snippet=%r validation_result=%s low_confidence=%s",
-        entry_id, snippet, validation_result, low_conf,
+        "id=%s input_type=%s snippet=%r validation_result=%s low_confidence=%s penalty=%.1f",
+        entry_id, result.get("input_type", "?"), snippet, validation_result, low_conf, penalty,
     )
 
     return result

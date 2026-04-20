@@ -1,20 +1,44 @@
 from typing import Literal
 from pydantic import BaseModel, field_validator, model_validator
 
-EMOTION_LABELS = {"joy", "sadness", "anger", "fear", "anticipation", "trust"}
+SCHEMA_VERSION = "1.1"
+
+# trust removed — low-signal fallback replaced by indeterminate
+EMOTION_LABELS = {
+    "joy", "sadness", "anger", "fear", "anticipation",
+    "neutral", "flat", "ambivalent", "indeterminate",
+}
 
 THEMES = {
     "uncertainty", "overwhelm", "purpose", "traction",
     "self_trust", "isolation", "momentum", "creative_satisfaction",
 }
 
+# indeterminate = unified uncertainty output, not a separate mechanism per field
 STATE_DIRECTIONS = {
     "gaining_clarity", "losing_direction", "building_momentum",
-    "stuck", "regaining_confidence", "drifting",
+    "stuck", "regaining_confidence", "drifting", "indeterminate",
 }
+
+INPUT_TYPES = {"affective", "metacognitive"}
 
 AROUSAL_VALUES = {"low", "medium", "high"}
 INTENSITY_VALUES = {"low", "medium", "high"}
+
+# Phrases that signal genuine uncertainty — used to down-rank confidence in extract.py
+UNCERTAINTY_PHRASES = (
+    "not sure",
+    "i keep",
+    "i don't know why",
+    "i guess",
+    "i'm not sure",
+    "maybe",
+    "kind of",
+    "sort of",
+    "i can't tell",
+    "i wonder",
+    "i don't know",
+)
 
 
 class SignalRecord(BaseModel):
@@ -22,6 +46,7 @@ class SignalRecord(BaseModel):
     timestamp: str
     schema_version: str
     raw_text: str
+    input_type: str                          # affective | metacognitive
     valence: float
     arousal: Literal["low", "medium", "high"]
     emotion_label: str
@@ -32,6 +57,13 @@ class SignalRecord(BaseModel):
     low_confidence: bool
     confidence_score: float
     entry_hash: str
+
+    @field_validator("input_type")
+    @classmethod
+    def valid_input_type(cls, v: str) -> str:
+        if v not in INPUT_TYPES:
+            raise ValueError(f"input_type '{v}' not in vocabulary: {INPUT_TYPES}")
+        return v
 
     @field_validator("valence")
     @classmethod
@@ -83,8 +115,7 @@ class SignalRecord(BaseModel):
 
     @model_validator(mode="after")
     def low_confidence_matches_score(self) -> "SignalRecord":
-        if self.confidence_score < 0.5:
-            object.__setattr__(self, "low_confidence", True)
+        object.__setattr__(self, "low_confidence", self.confidence_score < 0.5)
         return self
 
 
